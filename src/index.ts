@@ -65,6 +65,7 @@ interface ZlemaResult {
   last_candle_time: number
 }
 interface PullbackSetup {
+  pullback_direction: string | null
   pullback_atr_5m: number | null
   pullback_entry_target: number | null
   pullback_tp: number | null
@@ -339,6 +340,7 @@ function computeAtr14(candles: Candle[]): number | null {
 async function computePullbackSetup(naiveDirection: string | null, naiveEntry: number | null,
                                      naiveTp: number | null, naiveSl: number | null): Promise<PullbackSetup> {
   const empty: PullbackSetup = {
+    pullback_direction: null,
     pullback_atr_5m: null, pullback_entry_target: null, pullback_tp: null,
     pullback_sl: null, pullback_rr: null, pullback_pos_size: null,
   }
@@ -366,6 +368,7 @@ async function computePullbackSetup(naiveDirection: string | null, naiveEntry: n
     const posSize = RISK_USD / riskDist
 
     return {
+      pullback_direction: naiveDirection,
       pullback_atr_5m: Math.round(atr * 100) / 100,
       pullback_entry_target: Math.round(entryTarget * 100) / 100,
       pullback_tp: naiveTp,
