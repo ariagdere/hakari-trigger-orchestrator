@@ -418,27 +418,31 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
     : null
   session.naiveSetup = naiveSetup ?? undefined
 
-  // ── HIZLI YOL -- robotları beklemeden hemen gönder ──────────────────────
+  // ── HIZLI YOL -- robotları beklemeden hemen gönder, SADECE aligned ise ──
   const aligned = !!(naiveSetup?.naive_direction && zlema?.zlema_zone_4h
     && naiveSetup.naive_direction === zlema.zlema_zone_4h)
 
-  try {
-    await fetch(MAKE_NAIF_WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apify_run_id: runId,
-        analyzed_at: new Date().toISOString(),
-        ref_price: refPrice,
-        ...clusters,
-        ...naiveSetup,
-        zlema_zone_4h: zlema?.zlema_zone_4h ?? null,
-        aligned,
-      }),
-    })
-    console.log(`[NAIF-WEBHOOK] Gönderildi (aligned=${aligned})`)
-  } catch (err) {
-    console.error('[NAIF-WEBHOOK] Gönderim hatası:', err)
+  if (aligned) {
+    try {
+      await fetch(MAKE_NAIF_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apify_run_id: runId,
+          analyzed_at: new Date().toISOString(),
+          ref_price: refPrice,
+          ...clusters,
+          ...naiveSetup,
+          zlema_zone_4h: zlema?.zlema_zone_4h ?? null,
+          aligned,
+        }),
+      })
+      console.log('[NAIF-WEBHOOK] Gönderildi (aligned=true)')
+    } catch (err) {
+      console.error('[NAIF-WEBHOOK] Gönderim hatası:', err)
+    }
+  } else {
+    console.log(`[NAIF-WEBHOOK] Aligned değil (naive=${naiveSetup?.naive_direction ?? 'null'}, zlema=${zlema?.zlema_zone_4h ?? 'null'}) -- gönderilmedi`)
   }
 
   // ── YAVAŞ YOL -- robotları şimdi tetikle ─────────────────────────────────
