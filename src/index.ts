@@ -64,6 +64,14 @@ interface ZlemaResult {
   ma2_last: number
   last_candle_time: number
 }
+interface PullbackSetup {
+  pullback_atr_5m: number | null
+  pullback_entry_target: number | null
+  pullback_tp: number | null
+  pullback_sl: number | null
+  pullback_rr: number | null
+  pullback_pos_size: number | null
+}
 interface RobotState {
   status: 'idle' | 'running' | 'done' | 'error'
   taskId?: string
@@ -80,6 +88,7 @@ interface Session {
   clusters?: ClusterResult
   zlema?: ZlemaResult
   naiveSetup?: NaiveSetup
+  pullbackSetup?: PullbackSetup
   robot1: RobotState
   robot2: RobotState
   robotTimeoutTimer?: ReturnType<typeof setTimeout>
@@ -310,6 +319,66 @@ async function computeZlemaZone(): Promise<ZlemaResult | null> {
   }
 }
 
+// ─── PULLBACK -- 5dk ATR(14), Wilder smoothing (naif_atr_pullback_analysis.py ile birebir) ─
+const PULLBACK_ATR_PERIOD = 14
+const PULLBACK_ATR_SEED_BARS = 40 // Wilder yumuşamasının oturması için ATR_PERIOD'dan fazla mum
+
+function computeAtr14(candles: Candle[]): number | null {
+  if (candles.length < PULLBACK_ATR_PERIOD + 1) return null
+  const tr = trueRange(candles)
+  // İlk ATR: ilk PULLBACK_ATR_PERIOD adet TR'nin sade ortalaması (0. bar hariç, gerçek TR değil)
+  let sum = 0
+  for (let i = 1; i <= PULLBACK_ATR_PERIOD; i++) sum += tr[i]
+  let atr = sum / PULLBACK_ATR_PERIOD
+  for (let i = PULLBACK_ATR_PERIOD + 1; i < candles.length; i++) {
+    atr = (atr * (PULLBACK_ATR_PERIOD - 1) + tr[i]) / PULLBACK_ATR_PERIOD
+  }
+  return atr
+}
+
+async function computePullbackSetup(naiveDirection: string | null, naiveEntry: number | null,
+                                     naiveTp: number | null, naiveSl: number | null): Promise<PullbackSetup> {
+  const empty: PullbackSetup = {
+    pullback_atr_5m: null, pullback_entry_target: null, pullback_tp: null,
+    pullback_sl: null, pullback_rr: null, pullback_pos_size: null,
+  }
+  if (!naiveDirection || naiveEntry == null || naiveTp == null || naiveSl == null) return empty
+
+  try {
+    const r = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=${PULLBACK_ATR_SEED_BARS}`)
+    const raw = await r.json()
+    if (!Array.isArray(raw) || raw.length < PULLBACK_ATR_PERIOD + 1) return empty
+    const candles: Candle[] = raw.map((k: any) => ({
+      time: Number(k[0]), open: parseFloat(k[1]), high: parseFloat(k[2]),
+      low: parseFloat(k[3]), close: parseFloat(k[4]),
+    }))
+    const atr = computeAtr14(candles)
+    if (atr == null || atr <= 0) return empty
+
+    const entryTarget = naiveDirection === 'LONG' ? naiveEntry - atr : naiveEntry + atr
+
+    // TP/SL mutlak fiyat olarak naif'le AYNI -- sadece entry (ve dolayısıyla risk mesafesi) değişiyor
+    const riskDist = Math.abs(entryTarget - naiveSl)
+    const rewardDist = Math.abs(naiveTp - entryTarget)
+    if (riskDist <= 0) return empty // ATR, SL'i aşmış -- geçersiz kurulum
+
+    const rr = rewardDist / riskDist
+    const posSize = RISK_USD / riskDist
+
+    return {
+      pullback_atr_5m: Math.round(atr * 100) / 100,
+      pullback_entry_target: Math.round(entryTarget * 100) / 100,
+      pullback_tp: naiveTp,
+      pullback_sl: naiveSl,
+      pullback_rr: Math.round(rr * 1000) / 1000,
+      pullback_pos_size: Math.round(posSize * 100) / 100, // MetaAPI volume ile tutarlı, 2 ondalık
+    }
+  } catch (err) {
+    console.error('[PULLBACK] Hesaplama hatası:', err)
+    return empty
+  }
+}
+
 // ─── APIFY TETİKLEME + RETRY ────────────────────────────────────────────────
 async function triggerApify() {
   const webhooksConfig = [{
@@ -418,6 +487,13 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
     : null
   session.naiveSetup = naiveSetup ?? undefined
 
+  // Pullback her analizde hesaplanır (naif'in kendisi gibi) -- alignment'tan bağımsız.
+  // Tek kaynak burası; hem hızlı hem yavaş webhook aynı session.pullbackSetup'ı kullanır.
+  const pullbackSetup = naiveSetup
+    ? await computePullbackSetup(naiveSetup.naive_direction, naiveSetup.naive_entry, naiveSetup.naive_tp, naiveSetup.naive_sl)
+    : null
+  session.pullbackSetup = pullbackSetup ?? undefined
+
   // ── HIZLI YOL -- robotları beklemeden hemen gönder, SADECE aligned ise ──
   const aligned = !!(naiveSetup?.naive_direction && zlema?.zlema_zone_4h
     && naiveSetup.naive_direction === zlema.zlema_zone_4h)
@@ -435,6 +511,7 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
           ...naiveSetup,
           zlema_zone_4h: zlema?.zlema_zone_4h ?? null,
           aligned,
+          ...pullbackSetup,
         }),
       })
       console.log('[NAIF-WEBHOOK] Gönderildi (aligned=true)')
@@ -543,6 +620,11 @@ async function finalizeCycle() {
       ...session.clusters,
     },
     apify_run_id: session.apifyRunId, // Make'in AI akışında UPSERT/order eşleştirmesi için kolay erişim
+    // Pullback -- SADECE burada hesaplanıyor, başka bir modülde tekrar hesaplanmamalı
+    // (naif_direction gibi iki-kaynaklı bir tutarsızlık riskine düşmemek için).
+    // naive_* alanları BİLEREK buraya eklenmedi -- onlar hâlâ mevcut 1310 modülünün
+    // sorumluluğunda, o zaten doğru çalışıyor, ikinci bir kaynak eklemek riskli olur.
+    ...session.pullbackSetup,
     completedAt: new Date().toISOString(),
   }
 
