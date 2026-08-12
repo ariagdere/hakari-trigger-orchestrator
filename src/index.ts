@@ -86,6 +86,7 @@ interface Session {
   apifyRetryTimer?: ReturnType<typeof setTimeout>
   apifyRunId?: string
   apifyDatasetId?: string
+  heatmap?: any
   clusters?: ClusterResult
   zlema?: ZlemaResult
   naiveSetup?: NaiveSetup
@@ -476,6 +477,7 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
   if (session.apifyRetryTimer) clearTimeout(session.apifyRetryTimer)
   session.apifyRunId = runId
   session.apifyDatasetId = datasetId
+  session.heatmap = heatmap
   session.clusters = clusters
   console.log(`[APIFY-WEBHOOK] Başarılı. runId=${runId} clusters=`, clusters)
 
@@ -628,6 +630,10 @@ async function finalizeCycle() {
     // naive_* alanları BİLEREK buraya eklenmedi -- onlar hâlâ mevcut 1310 modülünün
     // sorumluluğunda, o zaten doğru çalışıyor, ikinci bir kaynak eklemek riskli olur.
     ...session.pullbackSetup,
+    // Ham heatmap -- apify_heatmap_snapshots'a yazilmasi icin. analysis_id
+    // burada (Make'in AI akisinda, satir olusturuldugu anda) KESIN biliniyor,
+    // bu yuzden tarih-yakinsama tahminine hic gerek yok (match_confidence='exact').
+    heatmap_json: session.heatmap ?? null,
     completedAt: new Date().toISOString(),
   }
 
