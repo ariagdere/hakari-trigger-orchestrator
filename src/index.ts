@@ -625,14 +625,14 @@ async function finalizeCycle() {
       ...session.clusters,
     },
     apify_run_id: session.apifyRunId, // Make'in AI akışında UPSERT/order eşleştirmesi için kolay erişim
-    // naive_direction + zlema_zone_4h -- TEK KAYNAK burasi olsun diye eklendi.
-    // Daha once Make'in kendi 1310/ZLEMA modulleri bunlari AYRICA, birkac
-    // dakika sonra kendi mum verisiyle yeniden hesapliyordu -- bu iki farkli
-    // hesaplama zaman farkindan dolayi FARKLI sonuc verebiliyordu (2026-08-18'de
-    // canli tespit edildi: orchestrator SHORT/LONG=aligned-degil derken, AI
-    // akisi farkli cikarim yapmisti). Make tarafinda artik bu iki alan icin
-    // 1310/ZLEMA modulunun kendi ciktisi degil, buradaki degerler yazilmali.
-    naive_direction: session.naiveSetup?.naive_direction ?? null,
+    // naive_* -- TUM setup (direction+entry+tp+sl+rr+dist_ratio+pos_size) TEK
+    // KAYNAK burasi. Sadece direction'i degistirip TP/SL'i 1310'un kendi
+    // (farkli aninda, farkli yon varsayimiyla hesaplanmis) degerlerinde
+    // birakmak, direction ile TP/SL'in birbirini tutmamasi riskini tasiyordu
+    // (2026-08-18: 1310 SHORT icin TP/SL uretti, 457 LONG dedi -- tutarsizlik).
+    // Artik 1310 KULLANILMIYOR, tum naive_* alanlari buradan (AYNI, tek
+    // cluster snapshot'indan, atomik olarak) geliyor -- pullback'teki gibi.
+    ...session.naiveSetup,
     zlema_zone_4h: session.zlema?.zlema_zone_4h ?? null,
     ...session.pullbackSetup,
     // Ham heatmap -- apify_heatmap_snapshots'a yazilmasi icin. analysis_id
