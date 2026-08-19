@@ -293,15 +293,7 @@ async function computeZlemaZone(): Promise<ZlemaResult | null> {
     const r = await fetch('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=4h&limit=150')
     const raw = await r.json()
     if (!Array.isArray(raw) || raw.length < 30) return null
-    // Binance, limit+endTime olmadan sorgulanınca son elemanda HÂLÂ OLUŞMAKTA
-    // olan (kapanmamış) mumu da döndürür -- bu, ZLEMA'nın henüz kesinleşmemiş,
-    // değişebilecek bir fiyat hareketine göre yön belirlemesine yol açardı.
-    // closeTime (ham dizide index 6) şu andan ileride olan mumları at, sadece
-    // GERÇEKTEN kapanmış mumlarla hesapla.
-    const nowMs = Date.now()
-    const closedRaw = raw.filter((k: any) => Number(k[6]) < nowMs)
-    if (closedRaw.length < 30) return null
-    const candles: Candle[] = closedRaw.map((k: any) => ({
+    const candles: Candle[] = raw.map((k: any) => ({
       time: Number(k[0]), open: parseFloat(k[1]), high: parseFloat(k[2]),
       low: parseFloat(k[3]), close: parseFloat(k[4]),
     }))
@@ -494,9 +486,6 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
 
   const zlema = await computeZlemaZone()
   session.zlema = zlema ?? undefined
-  if (zlema) {
-    console.log(`[ZLEMA] zone=${zlema.zlema_zone_4h}  son KAPANMIŞ mum=${new Date(zlema.last_candle_time).toISOString()}  ma1=${zlema.ma1_last}  ma2=${zlema.ma2_last}`)
-  }
 
   const naiveSetup = (refPrice && clusters.cluster_up_btc != null && clusters.cluster_dn_btc != null)
     ? computeNaiveSetup(refPrice, clusters.cluster_up_btc, clusters.cluster_dn_btc)
