@@ -494,6 +494,9 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
 
   const zlema = await computeZlemaZone()
   session.zlema = zlema ?? undefined
+  if (zlema) {
+    console.log(`[ZLEMA] zone=${zlema.zlema_zone_4h}  son KAPANMIŞ mum=${new Date(zlema.last_candle_time).toISOString()}  ma1=${zlema.ma1_last}  ma2=${zlema.ma2_last}`)
+  }
 
   const naiveSetup = (refPrice && clusters.cluster_up_btc != null && clusters.cluster_dn_btc != null)
     ? computeNaiveSetup(refPrice, clusters.cluster_up_btc, clusters.cluster_dn_btc)
