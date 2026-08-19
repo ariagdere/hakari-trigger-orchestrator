@@ -293,7 +293,15 @@ async function computeZlemaZone(): Promise<ZlemaResult | null> {
     const r = await fetch('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=4h&limit=150')
     const raw = await r.json()
     if (!Array.isArray(raw) || raw.length < 30) return null
-    const candles: Candle[] = raw.map((k: any) => ({
+    // Binance, limit+endTime olmadan sorgulanınca son elemanda HÂLÂ OLUŞMAKTA
+    // olan (kapanmamış) mumu da döndürür -- bu, ZLEMA'nın henüz kesinleşmemiş,
+    // değişebilecek bir fiyat hareketine göre yön belirlemesine yol açardı.
+    // closeTime (ham dizide index 6) şu andan ileride olan mumları at, sadece
+    // GERÇEKTEN kapanmış mumlarla hesapla.
+    const nowMs = Date.now()
+    const closedRaw = raw.filter((k: any) => Number(k[6]) < nowMs)
+    if (closedRaw.length < 30) return null
+    const candles: Candle[] = closedRaw.map((k: any) => ({
       time: Number(k[0]), open: parseFloat(k[1]), high: parseFloat(k[2]),
       low: parseFloat(k[3]), close: parseFloat(k[4]),
     }))
