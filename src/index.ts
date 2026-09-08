@@ -113,6 +113,17 @@ function clearTimers(s: Session) {
   if (s.robotTimeoutTimer) clearTimeout(s.robotTimeoutTimer)
 }
 
+// İstanbul (UTC+3, 2016'dan beri DST yok -- sabit kayma yeterli) saatine göre
+// bugünün haftaiçi (Pazartesi-Cuma) olup olmadığını döner. Sunucu (Railway)
+// UTC çalıştığı için, UTC gece yarısına yakın saatlerde dogrudan
+// `new Date().getDay()` YANLIŞ günü verebilir -- bu yüzden once +3 saat
+// kaydırıp UTC gün adını okuyoruz.
+function isWeekdayIstanbul(): boolean {
+  const istanbulMs = Date.now() + 3 * 60 * 60 * 1000
+  const day = new Date(istanbulMs).getUTCDay() // 0=Pazar ... 6=Cumartesi
+  return day >= 1 && day <= 5
+}
+
 // ─── HATA BİLDİRİMİ ────────────────────────────────────────────────────────
 async function notifyError(source: string, reason: string, extra: Record<string, unknown> = {}) {
   try {
@@ -499,11 +510,13 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
     : null
   session.pullbackSetup = pullbackSetup ?? undefined
 
-  // ── HIZLI YOL -- robotları beklemeden hemen gönder, SADECE aligned ise ──
+  // ── HIZLI YOL -- robotları beklemeden hemen gönder, SADECE aligned VE
+  // haftaiçi ise (İstanbul saatine göre) ──────────────────────────────────
   const aligned = !!(naiveSetup?.naive_direction && zlema?.zlema_zone_4h
     && naiveSetup.naive_direction === zlema.zlema_zone_4h)
+  const weekday = isWeekdayIstanbul()
 
-  if (aligned) {
+  if (aligned && weekday) {
     try {
       await fetch(MAKE_NAIF_WEBHOOK_URL, {
         method: 'POST',
@@ -519,10 +532,12 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
           ...pullbackSetup,
         }),
       })
-      console.log('[NAIF-WEBHOOK] Gönderildi (aligned=true)')
+      console.log('[NAIF-WEBHOOK] Gönderildi (aligned=true, haftaiçi)')
     } catch (err) {
       console.error('[NAIF-WEBHOOK] Gönderim hatası:', err)
     }
+  } else if (aligned && !weekday) {
+    console.log('[NAIF-WEBHOOK] Aligned ama hafta sonu (İstanbul saati) -- gönderilmedi')
   } else {
     console.log(`[NAIF-WEBHOOK] Aligned değil (naive=${naiveSetup?.naive_direction ?? 'null'}, zlema=${zlema?.zlema_zone_4h ?? 'null'}) -- gönderilmedi`)
   }
