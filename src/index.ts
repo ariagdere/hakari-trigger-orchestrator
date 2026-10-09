@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express'
+import { isNaifWindowIstanbul } from './naifWindow'
 
 const app = express()
 app.use(express.json({ limit: '20mb' }))
@@ -111,17 +112,6 @@ let session: Session = freshSession()
 function clearTimers(s: Session) {
   if (s.apifyRetryTimer) clearTimeout(s.apifyRetryTimer)
   if (s.robotTimeoutTimer) clearTimeout(s.robotTimeoutTimer)
-}
-
-// İstanbul (UTC+3, 2016'dan beri DST yok -- sabit kayma yeterli) saatine göre
-// bugünün haftaiçi (Pazartesi-Cuma) olup olmadığını döner. Sunucu (Railway)
-// UTC çalıştığı için, UTC gece yarısına yakın saatlerde dogrudan
-// `new Date().getDay()` YANLIŞ günü verebilir -- bu yüzden once +3 saat
-// kaydırıp UTC gün adını okuyoruz.
-function isWeekdayIstanbul(): boolean {
-  const istanbulMs = Date.now() + 3 * 60 * 60 * 1000
-  const day = new Date(istanbulMs).getUTCDay() // 0=Pazar ... 6=Cumartesi
-  return day >= 1 && day <= 5
 }
 
 // ─── HATA BİLDİRİMİ ────────────────────────────────────────────────────────
@@ -510,13 +500,13 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
     : null
   session.pullbackSetup = pullbackSetup ?? undefined
 
-  // ── HIZLI YOL -- robotları beklemeden hemen gönder, SADECE aligned VE
-  // haftaiçi ise (İstanbul saatine göre) ──────────────────────────────────
+  // ── HIZLI YOL -- robotları beklemeden hemen gönder, SADECE aligned VE döngü
+  // Pazartesi 00:00 - Cuma 15:00 arasında başladıysa (İstanbul saati, bkz. naifWindow.ts) ──
   const aligned = !!(naiveSetup?.naive_direction && zlema?.zlema_zone_4h
     && naiveSetup.naive_direction === zlema.zlema_zone_4h)
-  const weekday = isWeekdayIstanbul()
+  const inWindow = isNaifWindowIstanbul(session.startedAt)
 
-  if (aligned && weekday) {
+  if (aligned && inWindow) {
     try {
       await fetch(MAKE_NAIF_WEBHOOK_URL, {
         method: 'POST',
@@ -532,12 +522,12 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
           ...pullbackSetup,
         }),
       })
-      console.log('[NAIF-WEBHOOK] Gönderildi (aligned=true, haftaiçi)')
+      console.log('[NAIF-WEBHOOK] Gönderildi (aligned=true, Pzt-Cuma 15:00 penceresi)')
     } catch (err) {
       console.error('[NAIF-WEBHOOK] Gönderim hatası:', err)
     }
-  } else if (aligned && !weekday) {
-    console.log('[NAIF-WEBHOOK] Aligned ama hafta sonu (İstanbul saati) -- gönderilmedi')
+  } else if (aligned && !inWindow) {
+    console.log(`[NAIF-WEBHOOK] Aligned ama döngü Cuma 15:00 sonrası / hafta sonu başladı (İstanbul saati, başlangıç ${new Date(session.startedAt).toISOString()}) -- gönderilmedi`)
   } else {
     console.log(`[NAIF-WEBHOOK] Aligned değil (naive=${naiveSetup?.naive_direction ?? 'null'}, zlema=${zlema?.zlema_zone_4h ?? 'null'}) -- gönderilmedi`)
   }
