@@ -7,20 +7,14 @@ app.use(express.json({ limit: '20mb' }))
 // ─── ENV ────────────────────────────────────────────────────────────────────
 const APIFY_ACT_ID       = process.env.APIFY_ACT_ID!
 const APIFY_TOKEN        = process.env.APIFY_TOKEN!
-const ROBOT_1_ID         = process.env.ROBOT_1_ID!
-const ROBOT_2_ID         = process.env.ROBOT_2_ID!
-const ROBOT_1_ORIGIN_URL = process.env.ROBOT_1_ORIGIN_URL!
-const ROBOT_2_ORIGIN_URL = process.env.ROBOT_2_ORIGIN_URL!
-const BROWSEAI_API_KEY   = process.env.BROWSEAI_API_KEY!
-const MAKE_AI_WEBHOOK_URL    = process.env.MAKE_AI_WEBHOOK_URL!     // mevcut, DEĞİŞMEYEN payload formatı
-const MAKE_NAIF_WEBHOOK_URL  = process.env.MAKE_NAIF_WEBHOOK_URL!   // yeni, hızlı yol
+const MAKE_AI_WEBHOOK_URL    = process.env.MAKE_AI_WEBHOOK_URL!     // yavaş yol: Make'in AI akışı (btc_analysis + heatmap snapshot kaydı)
+const MAKE_NAIF_WEBHOOK_URL  = process.env.MAKE_NAIF_WEBHOOK_URL!   // hızlı yol: naif emir
 const MAKE_ERROR_WEBHOOK_URL = process.env.MAKE_ERROR_WEBHOOK_URL!
 const PUBLIC_BASE_URL     = process.env.PUBLIC_BASE_URL!            // bu servisin kendi public URL'i (Apify dynamic webhook için)
 const PORT                = process.env.PORT || 3000
 
 const REQUIRED_ENV = [
-  'APIFY_ACT_ID', 'APIFY_TOKEN', 'ROBOT_1_ID', 'ROBOT_2_ID',
-  'ROBOT_1_ORIGIN_URL', 'ROBOT_2_ORIGIN_URL', 'BROWSEAI_API_KEY',
+  'APIFY_ACT_ID', 'APIFY_TOKEN',
   'MAKE_AI_WEBHOOK_URL', 'MAKE_NAIF_WEBHOOK_URL', 'MAKE_ERROR_WEBHOOK_URL', 'PUBLIC_BASE_URL',
 ]
 for (const key of REQUIRED_ENV) {
@@ -41,7 +35,10 @@ const APIFY_BATCH_WAIT_MS    = 5 * 60 * 1000   // 2 batch arası bekleme
 const APIFY_RETRY_GAP_MS     = 3000            // batch içi ardışık denemeler arası küçük tampon
 const APIFY_NOTIFY_EVERY_N_BATCHES = 3
 
-const ROBOT_TIMEOUT_MS = 20 * 60 * 1000
+// Naif webhook'u gönderildiyse AI webhook'u bu kadar sonra gider, gönderilmediyse hemen. Browse AI robotları
+// varken AI webhook'u robotların bitmesini beklediği için hep naif webhook'tan dakikalar sonra geliyordu; Make'in
+// AI akışı apify_run_id ile UPSERT ve emir eşleştirmesi yaptığından, naif akış işini bitirsin diye bu sıra korunuyor.
+const AI_WEBHOOK_DELAY_MS = 3 * 60 * 1000
 
 // ─── TİPLER ─────────────────────────────────────────────────────────────────
 interface ClusterResult {
@@ -74,11 +71,6 @@ interface PullbackSetup {
   pullback_rr: number | null
   pullback_pos_size: number | null
 }
-interface RobotState {
-  status: 'idle' | 'running' | 'done' | 'error'
-  taskId?: string
-  attempt: number
-}
 interface Session {
   active: boolean
   startedAt: number
@@ -92,9 +84,7 @@ interface Session {
   zlema?: ZlemaResult
   naiveSetup?: NaiveSetup
   pullbackSetup?: PullbackSetup
-  robot1: RobotState
-  robot2: RobotState
-  robotTimeoutTimer?: ReturnType<typeof setTimeout>
+  aiWebhookTimer?: ReturnType<typeof setTimeout>
 }
 
 function freshSession(): Session {
@@ -103,15 +93,13 @@ function freshSession(): Session {
     startedAt: 0,
     apifyAttemptInBatch: 0,
     apifyBatchCount: 0,
-    robot1: { status: 'idle', attempt: 0 },
-    robot2: { status: 'idle', attempt: 0 },
   }
 }
 let session: Session = freshSession()
 
 function clearTimers(s: Session) {
   if (s.apifyRetryTimer) clearTimeout(s.apifyRetryTimer)
-  if (s.robotTimeoutTimer) clearTimeout(s.robotTimeoutTimer)
+  if (s.aiWebhookTimer) clearTimeout(s.aiWebhookTimer)
 }
 
 // ─── HATA BİLDİRİMİ ────────────────────────────────────────────────────────
@@ -443,6 +431,12 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
     console.log('[APIFY-WEBHOOK] Aktif session yok, görmezden geliniyor')
     return
   }
+  // Bu döngünün heatmap'i alındıysa sonradan gelen her Apify webhook'u (tekrar teslim, geç biten eski bir
+  // deneme) yok sayılır: naif webhook'u ikinci kez gitmesin, AI webhook'u iki kez zamanlanmasın.
+  if (session.apifyRunId !== undefined) {
+    console.log('[APIFY-WEBHOOK] Bu döngünün heatmap\'i zaten alındı, fazladan webhook görmezden geliniyor')
+    return
+  }
 
   const body = Array.isArray(req.body) ? req.body[0] : req.body
   const status = body.status || body.resource?.status
@@ -500,7 +494,7 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
     : null
   session.pullbackSetup = pullbackSetup ?? undefined
 
-  // ── HIZLI YOL -- robotları beklemeden hemen gönder, SADECE aligned VE döngü
+  // ── HIZLI YOL -- hemen gönder, SADECE aligned VE döngü
   // Pazartesi 00:00 - Cuma 15:00 arasında başladıysa (İstanbul saati, bkz. naifWindow.ts) ──
   const aligned = !!(naiveSetup?.naive_direction && zlema?.zlema_zone_4h
     && naiveSetup.naive_direction === zlema.zlema_zone_4h)
@@ -532,97 +526,23 @@ app.post('/webhook/apify', async (req: Request, res: Response) => {
     console.log(`[NAIF-WEBHOOK] Aligned değil (naive=${naiveSetup?.naive_direction ?? 'null'}, zlema=${zlema?.zlema_zone_4h ?? 'null'}) -- gönderilmedi`)
   }
 
-  // ── YAVAŞ YOL -- robotları şimdi tetikle ─────────────────────────────────
-  await triggerRobot('robot1')
-  await triggerRobot('robot2')
-  startRobotTimeout()
-})
-
-// ─── BROWSE AI TETİKLEME + RETRY ────────────────────────────────────────────
-async function triggerRobot(which: 'robot1' | 'robot2') {
-  const robotId   = which === 'robot1' ? ROBOT_1_ID : ROBOT_2_ID
-  const originUrl = which === 'robot1' ? ROBOT_1_ORIGIN_URL : ROBOT_2_ORIGIN_URL
-  const state = session[which]
-  state.status = 'running'
-  state.attempt++
-  try {
-    const res = await fetch(`https://api.browse.ai/v2/robots/${robotId}/tasks`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${BROWSEAI_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inputParameters: { originUrl } }),
-    })
-    const data = await res.json()
-    state.taskId = data?.result?.id
-    console.log(`[BROWSEAI] ${which} tetiklendi (attempt=${state.attempt}, taskId=${state.taskId})`)
-  } catch (err) {
-    console.error(`[BROWSEAI] ${which} tetikleme hatası:`, err)
-    state.status = 'error'
-  }
-}
-
-function startRobotTimeout() {
-  if (session.robotTimeoutTimer) clearTimeout(session.robotTimeoutTimer)
-  session.robotTimeoutTimer = setTimeout(async () => {
-    if (!session.active) return
-    const pending: string[] = []
-    if (session.robot1.status !== 'done') pending.push('robot1')
-    if (session.robot2.status !== 'done') pending.push('robot2')
-    if (pending.length === 0) return
-
-    console.warn(`[TIMEOUT] 20dk doldu, hâlâ bekleyen: ${pending.join(', ')}`)
-    await notifyError('browseai_timeout', '20_minute_timeout', { pending })
-    for (const which of pending) {
-      await triggerRobot(which as 'robot1' | 'robot2')
-    }
-    startRobotTimeout() // yeniden başlat
-  }, ROBOT_TIMEOUT_MS)
-}
-
-// ─── BROWSE AI WEBHOOK ──────────────────────────────────────────────────────
-app.post('/webhook/browseai', async (req: Request, res: Response) => {
-  res.json({ ok: true })
-
-  if (!session.active) {
-    console.log('[BROWSEAI-WEBHOOK] Aktif session yok, görmezden geliniyor')
-    return
-  }
-
-  const body = req.body
-  const robotId = body?.task?.robotId
-  const status  = body?.task?.status
-
-  let which: 'robot1' | 'robot2' | null = null
-  if (robotId === ROBOT_1_ID) which = 'robot1'
-  else if (robotId === ROBOT_2_ID) which = 'robot2'
-  if (!which) {
-    console.log('[BROWSEAI-WEBHOOK] Bilinmeyen robotId:', robotId)
-    return
-  }
-
-  const state = session[which]
-
-  if (status === 'successful') {
-    state.status = 'done'
-    console.log(`[BROWSEAI-WEBHOOK] ${which} başarılı`)
+  // ── YAVAŞ YOL -- Make'in AI akışına kayıt (btc_analysis + heatmap snapshot) ─
+  // Browse AI robotları çıkarıldı; döngü AI webhook'u gidince kapanır. Naif gönderildiyse
+  // AI_WEBHOOK_DELAY_MS sonra (naif akışı önce bitsin), gönderilmediyse hemen.
+  if (aligned && inWindow) {
+    console.log(`[FINALIZE] AI webhook'u ${AI_WEBHOOK_DELAY_MS / 1000} sn sonra gönderilecek (naif akışı önce bitsin)`)
+    session.aiWebhookTimer = setTimeout(() => { void finalizeCycle() }, AI_WEBHOOK_DELAY_MS)
   } else {
-    console.warn(`[BROWSEAI-WEBHOOK] ${which} beklenmeyen durum: ${status}`)
-    state.status = 'error'
-    await triggerRobot(which)
-    return
-  }
-
-  if (session.robot1.status === 'done' && session.robot2.status === 'done') {
     await finalizeCycle()
   }
 })
 
 // ─── SONLANDIRMA -- AI AKIŞINA GÖNDER ───────────────────────────────────────
 async function finalizeCycle() {
-  if (session.robotTimeoutTimer) clearTimeout(session.robotTimeoutTimer)
+  if (!session.active) return // /reset sonrası ya da zaten kapanmış döngü
+  if (session.aiWebhookTimer) clearTimeout(session.aiWebhookTimer)
 
   const payload = {
-    robot1: { robotId: ROBOT_1_ID, taskId: session.robot1.taskId },
-    robot2: { robotId: ROBOT_2_ID, taskId: session.robot2.taskId },
     apify: {
       actId: APIFY_ACT_ID,
       runId: session.apifyRunId,
@@ -689,8 +609,6 @@ app.get('/health', (_req: Request, res: Response) => {
     active: session.active,
     ageSeconds: session.active ? Math.round((Date.now() - session.startedAt) / 1000) : null,
     apify: { batchCount: session.apifyBatchCount, attemptInBatch: session.apifyAttemptInBatch, runId: session.apifyRunId ?? null },
-    robot1: session.robot1,
-    robot2: session.robot2,
     uptime: process.uptime(),
   })
 })
